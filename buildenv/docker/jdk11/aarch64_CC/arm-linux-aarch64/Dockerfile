@@ -92,7 +92,7 @@ RUN cd /root \
 ADD \
     http://ftp.us.debian.org/debian/pool/main/a/alsa-lib/libasound2_1.1.3-5_arm64.deb                \
     http://ftp.us.debian.org/debian/pool/main/a/alsa-lib/libasound2-dev_1.1.3-5_arm64.deb            \
-    http://ftp.us.debian.org/debian/pool/main/c/cups/libcups2-dev_2.2.1-8%2bdeb9u3_arm64.deb         \
+    http://ftp.us.debian.org/debian/pool/main/c/cups/libcups2-dev_2.2.1-8%2bdeb9u4_arm64.deb         \
     http://ftp.us.debian.org/debian/pool/main/c/cups/libcupsimage2-dev_2.2.1-8%2bdeb9u3_arm64.deb    \
     http://ftp.us.debian.org/debian/pool/main/d/dwarfutils/libdwarf-dev_20161124-1+deb9u1_arm64.deb  \
     http://ftp.us.debian.org/debian/pool/main/e/elfutils/libelf-dev_0.168-1_arm64.deb                \
