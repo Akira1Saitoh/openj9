@@ -42,6 +42,7 @@ RUN apt-get update \
     gcc-7 \
     git \
     git-core \
+    libpython2.7 \
     make \
     pkg-config \
     qemu \
