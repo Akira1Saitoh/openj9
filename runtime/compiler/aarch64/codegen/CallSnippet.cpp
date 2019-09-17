@@ -173,12 +173,17 @@ static int32_t instructionCountForArguments(TR::Node *callNode, TR::CodeGenerato
 TR_RuntimeHelper TR::ARM64CallSnippet::getHelper()
    {
    TR::Compilation * comp = cg()->comp();
+   TR_J9VMBase *fej9 = (TR_J9VMBase *)(comp->fe());
    TR::Node *callNode = getNode();
    TR::SymbolReference *methodSymRef = callNode->getSymbolReference();
    TR::MethodSymbol    *methodSymbol = methodSymRef->getSymbol()->castToMethodSymbol();
    TR::SymbolReference *glueRef = NULL;
 
-   if (methodSymRef->isUnresolved() || comp->compileRelocatableCode())
+   bool forceUnresolvedDispatch = fej9->forceUnresolvedDispatch();
+   if (comp->getOption(TR_UseSymbolValidationManager))
+      forceUnresolvedDispatch = false;
+
+   if (methodSymRef->isUnresolved() || forceUnresolvedDispatch)
       {
       if (methodSymbol->isSpecial())
          return TR_ARM64interpreterUnresolvedSpecialGlue;
@@ -221,6 +226,7 @@ uint8_t *TR::ARM64CallSnippet::emitSnippetBody()
    TR::MethodSymbol    *methodSymbol = methodSymRef->getSymbol()->castToMethodSymbol();
    TR::SymbolReference *glueRef;
    TR::Compilation *comp = cg()->comp();
+   TR_J9VMBase *fej9 = (TR_J9VMBase *)(comp->fe());
    void               *trmpln = NULL;
 
    getSnippetLabel()->setCodeLocation(cursor);
@@ -243,8 +249,12 @@ uint8_t *TR::ARM64CallSnippet::emitSnippetBody()
                                __FILE__, __LINE__, getNode());
    cursor += 8;
 
+   bool forceUnresolvedDispatch = fej9->forceUnresolvedDispatch();
+   if (comp->getOption(TR_UseSymbolValidationManager))
+      forceUnresolvedDispatch = false;
+
    // Store the method pointer: it is NULL for unresolved
-   if (methodSymRef->isUnresolved() || comp->compileRelocatableCode())
+   if (methodSymRef->isUnresolved() || forceUnresolvedDispatch)
       {
       *(intptrj_t *)cursor = 0;
       if (comp->getOption(TR_EnableHCR))
@@ -259,12 +269,19 @@ uint8_t *TR::ARM64CallSnippet::emitSnippetBody()
       {
       *(intptrj_t *)cursor = (intptrj_t)methodSymbol->getMethodAddress();
       if (comp->getOption(TR_EnableHCR))
-         {
          cg()->jitAddPicToPatchOnClassRedefinition((void *)methodSymbol->getMethodAddress(), (void *)cursor);
-         cg()->addExternalRelocation(new (cg()->trHeapMemory()) TR::ExternalRelocation(cursor, (uint8_t *)methodSymRef,
-                                                                                 getNode() ? (uint8_t *)getNode()->getInlinedSiteIndex() : (uint8_t *)-1,
-                                                                                 TR_MethodObject, cg()),
-                                     __FILE__, __LINE__, callNode);
+
+      if (comp->compileRelocatableCode())
+         {
+         cg()->addExternalRelocation(new (cg()->trHeapMemory()) TR::ExternalRelocation(cursor,
+                                                               (uint8_t *)methodSymbol->getMethodAddress(),
+                                                               (uint8_t *)TR::SymbolType::typeMethod,
+                                                               TR_SymbolFromManager,
+                                                               cg()),  __FILE__, __LINE__, getNode());
+         cg()->addExternalRelocation(new (cg()->trHeapMemory()) TR::ExternalRelocation(cursor,
+                                                               (uint8_t *)methodSymbol->getMethodAddress(),
+                                                               TR_ResolvedTrampolines,
+                                                               cg()), __FILE__, __LINE__, getNode());
          }
       }
    cursor += 8;
