@@ -300,20 +300,22 @@ J9::ARM64::TreeEvaluator::DIVCHKEvaluator(TR::Node *node, TR::CodeGenerator *cg)
 
    if (!isConstDivisor || (!is64Bit && divisor->getInt() == 0) || (is64Bit && divisor->getLongInt() == 0))
       {
+      TR::Instruction *gcPoint;
       TR::LabelSymbol *snippetLabel = generateLabelSymbol(cg);
       cg->addSnippet(new (cg->trHeapMemory()) TR::ARM64HelperCallSnippet(cg, node, snippetLabel, node->getSymbolReference()));
 
       if (isConstDivisor)
          {
          // No explicit check required
-         generateLabelInstruction(cg, TR::InstOpCode::b, node, snippetLabel);
+         gcPoint = generateLabelInstruction(cg, TR::InstOpCode::b, node, snippetLabel);
          }
       else
          {
          TR::Register *divisorReg = cg->evaluate(divisor);
          TR::InstOpCode::Mnemonic compareOp = is64Bit ? TR::InstOpCode::cbzx : TR::InstOpCode::cbzw;
-         generateCompareBranchInstruction(cg, compareOp, node, divisorReg, snippetLabel, NULL);
+         gcPoint = generateCompareBranchInstruction(cg, compareOp, node, divisorReg, snippetLabel, NULL);
          }
+      gcPoint->ARM64NeedsGCMap(cg, 0xffffffff);
       }
 
    cg->evaluate(node->getFirstChild());
