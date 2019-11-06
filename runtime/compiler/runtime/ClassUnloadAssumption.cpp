@@ -716,6 +716,25 @@ void TR_UnloadedClassPicSite::compensate(TR_FrontEnd *, bool isSMP, void *)
    value |= 0x03a00001;
    *((uint32_t *)_picLocation) = value;
    armCodeSync(_picLocation, 4);
+#elif defined(TR_HOST_ARM64)
+   extern void arm64CodeSync(unsigned char *codeStart, unsigned int codeSize);
+   if (_size == 4)
+      {
+      uint32_t value = *(uint32_t *)_picLocation;
+      // For aarch64, we use _size to check if PICSite is for address materialization sequence.
+      // If _size is 4, we assume the site is the last instruction of address materialization sequence.
+      // We change the instruction to movzx rX, #1
+      // The register number is encoded in bit 0:4.
+      value = 0xd2800020 | (value & 0x1f);
+      *((uint32_t *)_picLocation) = value;
+      arm64CodeSync(_picLocation, 4);
+      }
+   else
+      {
+      // If _size is not 4, the site is a whole pointer.
+      *(int64_t *)_picLocation = -1;
+      arm64CodeSync(_picLocation, 8);
+      }
 #else
    //   TR_ASSERT(0, "unloaded class PIC patching is not implemented on this platform yet");
 #endif
