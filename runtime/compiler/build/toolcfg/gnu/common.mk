@@ -197,7 +197,7 @@ ifeq ($(HOST_ARCH),arm)
 endif
 
 ifeq ($(HOST_ARCH),aarch64)
-    CX_FLAGS+=-fPIC
+    CX_FLAGS+=-fPIC -g
 endif
 
 ifeq ($(C_COMPILER),clang)
@@ -452,7 +452,7 @@ endif # HOST_ARCH == aarch64
 SOLINK_CMD?=$(CXX)
 
 SOLINK_FLAGS+=
-SOLINK_FLAGS_PROD+=-Wl,-S
+#SOLINK_FLAGS_PROD+=-Wl,-S
 
 SOLINK_LIBPATH+=$(PRODUCT_LIBPATH)
 SOLINK_SLINK+=$(PRODUCT_SLINK) j9thr$(J9_VERSION) j9hookable$(J9_VERSION)

@@ -562,6 +562,7 @@ JIT_HELPER(_interpreterUnresolvedDirectVirtualGlue);
 JIT_HELPER(_interpreterUnresolvedClassGlue);
 JIT_HELPER(_interpreterUnresolvedClassGlue2);
 JIT_HELPER(_interpreterUnresolvedStringGlue);
+JIT_HELPER(_interpreterUnresolvedConstantDynamicGlue);
 JIT_HELPER(_interpreterUnresolvedStaticDataGlue);
 JIT_HELPER(_interpreterUnresolvedStaticDataStoreGlue);
 JIT_HELPER(_interpreterUnresolvedInstanceDataGlue);
@@ -1516,6 +1517,7 @@ void initializeCodeRuntimeHelperTable(J9JITConfig *jitConfig, char isSMP)
    SET(TR_ARM64interpreterUnresolvedClassGlue,             (void *) _interpreterUnresolvedClassGlue,                TR_Helper);
    SET(TR_ARM64interpreterUnresolvedClassGlue2,            (void *) _interpreterUnresolvedClassGlue2,               TR_Helper);
    SET(TR_ARM64interpreterUnresolvedStringGlue,            (void *) _interpreterUnresolvedStringGlue,               TR_Helper);
+   SET(TR_ARM64interpreterUnresolvedConstantDynamicGlue,   (void *) _interpreterUnresolvedConstantDynamicGlue,      TR_Helper);
    SET(TR_ARM64interpreterUnresolvedStaticDataGlue,        (void *) _interpreterUnresolvedStaticDataGlue,           TR_Helper);
    SET(TR_ARM64interpreterUnresolvedStaticDataStoreGlue,   (void *) _interpreterUnresolvedStaticDataStoreGlue,      TR_Helper);
    SET(TR_ARM64interpreterUnresolvedInstanceDataGlue,      (void *) _interpreterUnresolvedInstanceDataGlue,         TR_Helper);

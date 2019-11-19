@@ -36,6 +36,7 @@
 	.globl	_interpreterUnresolvedStaticDataStoreGlue
 	.globl	_interpreterUnresolvedInstanceDataGlue
 	.globl	_interpreterUnresolvedInstanceDataStoreGlue
+	.globl	_interpreterUnresolvedConstantDynamicGlue
 	.globl	_virtualUnresolvedHelper
 	.globl	_interfaceCallHelper
 	.globl	_interpreterVoidStaticGlue
@@ -58,6 +59,7 @@
 	.extern	jitResolveStaticFieldSetter
 	.extern	jitResolveField
 	.extern	jitResolveFieldSetter
+	.extern	jitResolveConstantDynamic
 	.extern	jitResolveVirtualMethod
 	.extern	jitResolveInterfaceMethod
 	.extern	jitLookupInterfaceMethod
@@ -107,6 +109,14 @@
 	.set	J9TR_UVCSnippet_CPIndex,	16
 	.set	J9TR_UVCSnippet_method,		24
 	.set	J9TR_UVCSnippet_J2IThunk,	32
+
+// Unresolved data snippet
+
+	.set	J9TR_UDSnippet_codeCacheReturnAddress,	0
+	.set	J9TR_UDSnippet_CPIndex,		8
+	.set	J9TR_UDSnippet_CP,		16
+	.set	J9TR_UDSnippet_offset,		24
+	.set	J9TR_UDSnippet_template,	28
 
 	.text
 	.align 2
@@ -259,26 +269,144 @@ const_jitResolveStaticMethod:
 const_jitResolveSpecialMethod:
 	.dword	jitResolveSpecialMethod
 
-_interpreterUnresolvedClassGlue:
+// Handles calls to unresolved data snippets
+//
+// in:		x3 = resolve helper address
+//		x30 = snippet data
+// trash:	x10, x11
+
+// mainline:
+//    b    UnresolvedDataSnippet ; change this to "movz xN, #0"
+//    movk xN, #0, LSL #16
+//    movk xN, #0, LSL #32
+//    movk xN, #0, LSL #48
+//
+L_mergedDataResolve:
+	ldr	x0, [x30, #J9TR_UDSnippet_CP]			// load CP
+	ldr	w1, [x30, #J9TR_UDSnippet_CPIndex]		// load CP index
+	ldr	x10, [x30, #J9TR_UDSnippet_codeCacheReturnAddress]	// load code cache RA
+	mov	x11, x30					// protect LR
+	add	x2, x10, #1					// increment for EX search
+	blr	x3						// call helper
+	tbnz	x0, #clinit_bit_number, L_UDclinitCase		// branch if the LSB (the "clinit" bit) was set in the resolved address
+	ldr	w6, [x11, #J9TR_UDSnippet_offset]		// load offset
+	add	x3, x0, x6					// add in offset to return value
+	ldr	w1, [x10, #4]					// fetch the first movk instruction
+	ubfx	x2, x3, #16, #16				// bits 16-31 of the address
+	orr	w1, w1, w2, LSL #5				// encode the address in the movk instruction
+	str	w1, [x10, #4]					// store the movk instruction
+	ldr	w1, [x10, #8]					// fetch the second movk instruction
+	ubfx	x2, x3, #32, #16				// bits 32-47 of the address
+	orr	w1, w1, w2, LSL #5				// encode the address in the movk instruction
+	str	w1, [x10, #8]					// store the movk instruction
+	ldr	w1, [x10, #12]					// fetch the third movk instruction
+	ubfx	x2, x3, #48, #16				// bits 48-63 of the address
+	orr	w1, w1, w2, LSL #5				// encode the address in the movk instruction
+	str	w1, [x10, #12]					// store the movk instruction
+	ldr	w11, [x11, #J9TR_UDSnippet_template]		// load instruction template (movz)
+	ubfx	x2, x3, #0, #16					// bits 0-15 of the address
+	orr	w11, w11, w2, LSL #5				// encode the address in the movz instruction
+	add	x0, x10, 4					// address of the first movk instruction
+	mov	x1, #12						// 3 instructions to flush
+	bl	flushICache					// flush movk instructions
+	mov	x0, x10						// address of the b instruction
+	str	w11, [x0]					// store the movz instruction
+	mov	x1, #4						// 1 instruction to flush
+	bl	flushICache					// flush movz instruction
+	mov	x30, x10
+	ldp	x0, x1, [J9SP, #0]				// restore other parameter regs
+	ldp	x2, x3, [J9SP, #16]
+	ldp	x4, x5, [J9SP, #32]
+	ldp	x6, x7, [J9SP, #48]
+	add	J9SP, J9SP, #64
+	ret							// jump back to newly-written instruction sequence
+
+L_UDclinitCase:
+	and	x0, x0, #(~clinit_bit)				// clear the "clinit" bit
 	hlt	#0	// Not implemented yet
+	ret
+
+_interpreterUnresolvedClassGlue:
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveClass			// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedClassGlue2:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveClassFromStaticField	// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedStringGlue:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveString			// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedStaticDataGlue:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveStaticField		// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedStaticDataStoreGlue:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveStaticFieldSetter		// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedInstanceDataGlue:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveField			// load resolve helper address
+	b	L_mergedDataResolve
 
 _interpreterUnresolvedInstanceDataStoreGlue:
-	hlt	#0	// Not implemented yet
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveFieldSetter		// load resolve helper address
+	b	L_mergedDataResolve
+
+_interpreterUnresolvedConstantDynamicGlue:
+	stp	x0, x1, [J9SP, #-64]!				// save parameter regs
+	stp	x2, x3, [J9SP, #16]
+	stp	x4, x5, [J9SP, #32]
+	stp	x6, x7, [J9SP, #48]
+	ldr	x3, const_jitResolveConstantDynamic		// load resolve helper address
+	b	L_mergedDataResolve
+
+	.align	3
+const_jitResolveClass:
+	.dword	jitResolveClass
+const_jitResolveClassFromStaticField:
+	.dword	jitResolveClassFromStaticField
+const_jitResolveString:
+	.dword	jitResolveString
+const_jitResolveStaticField:
+	.dword	jitResolveStaticField
+const_jitResolveStaticFieldSetter:
+	.dword	jitResolveStaticFieldSetter
+const_jitResolveField:
+	.dword	jitResolveField
+const_jitResolveFieldSetter:
+	.dword	jitResolveFieldSetter
+const_jitResolveConstantDynamic:
+	.dword	jitResolveConstantDynamic
 
 // Handles calls to virtual unresolved call snippets
 //
