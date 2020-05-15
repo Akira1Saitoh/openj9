@@ -32,6 +32,7 @@
 #include "codegen/J9ARM64Snippet.hpp"
 #include "codegen/OMRCodeGenerator.hpp"
 #include "codegen/RegisterDependency.hpp"
+#include "codegen/Relocation.hpp"
 #include "codegen/TreeEvaluator.hpp"
 #include "il/DataTypes.hpp"
 #include "il/LabelSymbol.hpp"
@@ -544,6 +545,327 @@ J9::ARM64::TreeEvaluator::flushEvaluator(TR::Node *node, TR::CodeGenerator *cg)
    return NULL;
    }
 
+/**
+ * @brief Generates instructions for allocating heap for new/newarray/anewarray
+ *        The limitation of the current implementation:
+ *          - supports `new` only
+ *          - does not support dual TLH
+ *          - does not support realtimeGC
+ * 
+ * @param node: node
+ * @param cg: code generator
+ * @param allocSize: size to allocate on heap
+ * @param resultReg: the register that contains allocated heap address
+ * @param heapTopReg: temporary register
+ * @param tempReg: temporary register
+ * @param callLabel: label to call when allocattion fails
+ * 
+ */ 
+static void
+genHeapAlloc(TR::Node *node, TR::CodeGenerator *cg, uint32_t allocSize, TR::Register *resultReg, TR::Register *heapTopReg,
+   TR::Register *tempReg, TR::LabelSymbol *callLabel)
+   {
+   TR::Compilation * comp = cg->comp();
+   TR_J9VMBase *fej9 = (TR_J9VMBase *) (cg->fe());
+   TR::Register *metaReg = cg->getMethodMetaDataRegister();
+   TR::ILOpCodes opCode = node->getOpCodeValue();
+
+   uint32_t maxSafeSize = cg->getMaxObjectSizeGuaranteedNotToOverflow();
+
+   static_assert(offsetof(J9VMThread, heapAlloc) < 32760, "Expecting offset to heapAlloc fits in imm12");
+   static_assert(offsetof(J9VMThread, heapTop) < 32760, "Expecting offset to heapTop fits in imm12");
+
+   /*
+    * Instructions for allocating heap for `new`.
+    * 
+    * ldrimmx  resultReg, [metaReg, offsetToHeapAlloc]
+    * ldrimmx  heapTopReg, [metaReg, offsetToHeapTop]
+    * addsimmx tempReg, resutlReg, #allocSize
+    * # check for address wrap-around if necessary
+    * b.cc     callLabel
+    * # check for overflow
+    * cmp      tempReg, heapTopReg
+    * b.gt     callLabel
+    * # write back heapAlloc
+    * strimmx  tempReg, [metaReg, offsetToHeapAlloc]
+    * 
+    */
+
+   // Load the base of the next available heap storage.
+   generateTrg1MemInstruction(cg,TR::InstOpCode::ldrimmx, node, resultReg,
+         new (cg->trHeapMemory()) TR::MemoryReference(metaReg, offsetof(J9VMThread, heapAlloc), cg));
+   // Load the heap top
+   generateTrg1MemInstruction(cg,TR::InstOpCode::ldrimmx, node, heapTopReg,
+            new (cg->trHeapMemory()) TR::MemoryReference(metaReg, offsetof(J9VMThread, heapTop), cg));
+
+   // Calculate the after-allocation heapAlloc: if the size is huge,
+   // we need to check address wrap-around also. This is unsigned
+   // integer arithmetic, checking carry bit is enough to detect it.
+   const bool isAllocSizeInReg = !constantIsUnsignedImm12(allocSize);
+   const bool isWithinMaxSafeSize = allocSize <= maxSafeSize;
+   if (isAllocSizeInReg)
+      {
+      loadConstant64(cg, node, allocSize, tempReg);
+      generateTrg1Src2Instruction(cg, isWithinMaxSafeSize ? TR::InstOpCode::addx : TR::InstOpCode::addsx,
+                  node, tempReg, resultReg, tempReg);
+      }
+   else
+      {
+      generateTrg1Src1ImmInstruction(cg, isWithinMaxSafeSize ? TR::InstOpCode::addimmx : TR::InstOpCode::addsimmx,
+                  node, tempReg, resultReg, allocSize);
+      }
+   if (!isWithinMaxSafeSize)
+      {
+      generateConditionalBranchInstruction(cg, TR::InstOpCode::b_cond, node, callLabel, TR::CC_CC);
+      }
+
+   // Ok, tempReg now points to where the object will end on the TLH.
+   // resultReg will contain the start of the object where we'll write out our
+   // J9Class*. Should look like this in memory:
+   // [heapAlloc == resultReg] ... tempReg ...//... heapTopReg.
+
+   //Here we check if we overflow the TLH Heap Top
+   //branch to heapAlloc Snippet if we overflow (ie callLabel).
+   generateCompareInstruction(cg, node, tempReg, heapTopReg, true);
+   generateConditionalBranchInstruction(cg, TR::InstOpCode::b_cond, node, callLabel, TR::CC_GT);
+
+   //Done, write back to heapAlloc here.
+   generateMemSrc1Instruction(cg, TR::InstOpCode::strimmx, node,
+         new (cg->trHeapMemory()) TR::MemoryReference(metaReg, offsetof(J9VMThread, heapAlloc), cg), tempReg);
+
+   }
+
+static void
+genZeroInitObject(TR::Node *node, TR::CodeGenerator *cg, uint32_t objectSize, uint32_t dataBegin, TR::Register *objectReg, TR::Register *zeroReg,
+   TR::Register *tempReg1, TR::Register *tempReg2)
+   {
+   /*
+      * Instruction for clearing allocate memory
+      * 
+      * subimmx tempReg1, resultReg, (16 - #dataBegin)
+      * movzx   tempReg2, loopCount
+      * loop:
+      * stpimmx xzr, xzr, [tempReg1, #16]
+      * stpimmx xzr, xzr, [tempReg1, #32]
+      * stpimmx xzr, xzr, [tempReg1, #48]
+      * stpimmx xzr, xzr, [tempReg1, #64]! // pre index
+      * subsimmx tempReg2, tempReg2, #1
+      * b.ne    loop
+      * // write residues
+      * stpimmx xzr, xzr [tempReg1, #16]
+      * stpimmx xzr, xzr [tempReg1, #32]
+      * stpimmx xzr, xzr [tempReg1, #48]
+      * strimmx xzr, [tempReg1, #64]
+      * strimmw xzr, [tempReg1, #72]
+      * 
+      */
+   // TODO use vector register
+   // TODO use dc zva 
+   const int32_t unrollFactor = 4;
+   const int32_t width = 16; // use stp to clear 16 bytes
+   const int32_t loopCount = (objectSize - dataBegin) / (unrollFactor * width);
+   const int32_t res1 = (objectSize - dataBegin) % (unrollFactor * width);
+   const int32_t residueCount = res1 / width;
+   const int32_t res2 = res1 % width;
+   TR::LabelSymbol *loopStart = generateLabelSymbol(cg);
+   
+   generateTrg1Src1ImmInstruction(cg, TR::InstOpCode::subimmx, node, tempReg1, objectReg, (16 - dataBegin));
+   if (loopCount > 0)
+      {
+      if (loopCount > 1)
+         {
+         loadConstant64(cg, node, loopCount, tempReg2);
+         generateLabelInstruction(cg, TR::InstOpCode::label, node, loopStart);
+         }
+      for (int i = 1; i < unrollFactor; i++)
+         {
+         generateMemSrc2Instruction(cg, TR::InstOpCode::stpoffx, node, new (cg->trHeapMemory()) TR::MemoryReference(tempReg1, i * width, cg), zeroReg, zeroReg);
+         }
+      generateMemSrc2Instruction(cg, TR::InstOpCode::stpprex, node, new (cg->trHeapMemory()) TR::MemoryReference(tempReg1, unrollFactor * width, cg), zeroReg, zeroReg);
+      if (loopCount > 1)
+         {
+         generateTrg1Src1ImmInstruction(cg, TR::InstOpCode::subsimmx, node, tempReg2, tempReg2, 1);
+         generateConditionalBranchInstruction(cg, TR::InstOpCode::b_cond, node, loopStart, TR::CC_NE);
+         }
+      }
+   for (int i = 0; i < residueCount; i++)
+      {
+      generateMemSrc2Instruction(cg, TR::InstOpCode::stpoffx, node, new (cg->trHeapMemory()) TR::MemoryReference(tempReg1, (i + 1) * width, cg), zeroReg, zeroReg);
+      }
+   int offset = (residueCount + 1) * width;
+   if (res2 >= 8)
+      {
+      generateMemSrc1Instruction(cg, TR::InstOpCode::strimmx, node, new (cg->trHeapMemory()) TR::MemoryReference(tempReg1, offset, cg), zeroReg);
+      offset += 8;
+      }
+   if ((res2 & 4) > 0)
+      {
+      generateMemSrc1Instruction(cg, TR::InstOpCode::strimmw, node, new (cg->trHeapMemory()) TR::MemoryReference(tempReg1, offset, cg), zeroReg);
+      }
+   }
+
+/**
+ * @brief Generates instructions for inlining new/newarray/anewarray
+ *        The limitation of the current implementation:
+ *          - supports `new` only
+ *          - does not support dual TLH
+ *          - does not support realtimeGC
+ * 
+ * @param node: node
+ * @param cg: code generator
+ * 
+ * @return register containing allocated object, NULL if inlining is not possible
+ */ 
+TR::Register *
+J9::ARM64::TreeEvaluator::VMnewEvaluator(TR::Node *node, TR::CodeGenerator *cg)
+   {
+   TR::Compilation * comp = cg->comp();
+   TR_J9VMBase *fej9 = (TR_J9VMBase *) (cg->fe());
+   bool generateArraylets = comp->generateArraylets();
+
+   if (comp->getOption(TR_DisableAllocationInlining))
+      return NULL;
+
+   if (comp->getOption(TR_DisableTarokInlineArrayletAllocation) && (node->getOpCodeValue() == TR::anewarray || node->getOpCodeValue() == TR::newarray))
+      return NULL;
+   
+   TR_OpaqueClassBlock *clazz      = NULL;
+
+   // --------------------------------------------------------------------------------
+   //
+   // Find the class info and allocation size depending on the node type.
+   //
+   // Returns:
+   //    size of object    includes the size of the array header
+   //    -1                cannot allocate inline
+   //    0                 variable sized allocation
+   //
+   // --------------------------------------------------------------------------------
+
+   int32_t objectSize = comp->canAllocateInline(node, clazz);
+   if (objectSize < 0)
+      return NULL;
+
+   static long count = 0;
+   if (!performTransformation(comp, "O^O <%3d> Inlining Allocation of %s [0x%p].\n", count++, node->getOpCode().getName(), node))
+      return NULL;
+
+   TR::Instruction *firstInstruction = cg->getAppendInstruction();
+   const bool isVariableLen = (objectSize == 0);
+   const bool realTimeGC = comp->getOptions()->realTimeGC();
+   int32_t dataBegin;
+   TR::Node *firstChild = node->getFirstChild();
+
+   TR::Register *classReg = NULL;
+   TR::ILOpCodes opCode = node->getOpCodeValue();
+   if (opCode == TR::New)
+      {
+      // realtimeGC: cannot inline if object size is too big to get a size class
+      if (realTimeGC)
+         {
+         if (static_cast<uint32_t>(objectSize) > fej9->getMaxObjectSizeForSizeClass())
+            {
+            return NULL;
+            }
+         }
+      // classReg is passed to the VM helper on the slow path and subsequently clobbered; copy it for later nodes if necessary
+      classReg = cg->gprClobberEvaluate(firstChild);
+      dataBegin = TR::Compiler->om.objectHeaderSizeInBytes();
+      }
+   else
+      {
+      // TODO newarray/anewarray
+      TR_UNIMPLEMENTED();
+      }
+
+   int32_t allocateSize = objectSize;
+   if (!isVariableLen)
+      {
+      allocateSize = (allocateSize + TR::Compiler->om.objectAlignmentInBytes() - 1) & (-TR::Compiler->om.objectAlignmentInBytes());
+      }
+
+   TR::Register *resultReg = cg->allocateRegister();
+   TR::Register *tempReg1 = cg->allocateRegister();
+   TR::Register *tempReg2 = cg->allocateRegister();
+   TR::Register *zeroReg = cg->allocateRegister();
+   TR::LabelSymbol *callLabel = generateLabelSymbol(cg);
+   TR::LabelSymbol *doneLabel = generateLabelSymbol(cg);
+
+   // Allocate object/array on heap
+   genHeapAlloc(node, cg, allocateSize, resultReg, tempReg1, tempReg2, callLabel);
+
+   TR::Snippet *snippet = new (cg->trHeapMemory()) TR::ARM64HeapAllocSnippet(cg, node, callLabel, node->getSymbolReference(), doneLabel);
+   cg->addSnippet(snippet);
+
+   // Initialize the allocated memory area with zero
+   // TODO selectively initialize necessary slots
+   genZeroInitObject(node, cg, objectSize, dataBegin, resultReg, zeroReg, tempReg1, tempReg2);
+
+   // Initialize Object Header
+   generateMemSrc1Instruction(cg, TR::Compiler->om.generateCompressedObjectHeaders() ? TR::InstOpCode::strimmw : TR::InstOpCode::strimmx,
+         node, new (cg->trHeapMemory()) TR::MemoryReference(resultReg, (int32_t) TR::Compiler->om.offsetOfObjectVftField(), cg), classReg);
+
+   if (cg->comp()->compileRelocatableCode() && (opCode == TR::New || opCode == TR::anewarray))
+      {
+      firstInstruction = firstInstruction->getNext();
+      TR_OpaqueClassBlock *classToValidate = clazz;
+
+      TR_RelocationRecordInformation *recordInfo = (TR_RelocationRecordInformation *) comp->trMemory()->allocateMemory(sizeof(TR_RelocationRecordInformation), heapAlloc);
+      recordInfo->data1 = allocateSize;
+      recordInfo->data2 = node->getInlinedSiteIndex();
+      recordInfo->data3 = (uintptr_t) callLabel;
+      recordInfo->data4 = (uintptr_t) firstInstruction;
+
+      TR::SymbolReference * classSymRef;
+      TR_ExternalRelocationTargetKind reloKind;
+
+      if (opCode == TR::New)
+         {
+         classSymRef = node->getFirstChild()->getSymbolReference();
+         reloKind = TR_VerifyClassObjectForAlloc;
+         }
+      else
+         {
+         classSymRef = node->getSecondChild()->getSymbolReference();
+         reloKind = TR_VerifyRefArrayForAlloc;
+
+         if (comp->getOption(TR_UseSymbolValidationManager))
+            classToValidate = comp->fej9()->getComponentClassFromArrayClass(classToValidate);
+         }
+
+      if (comp->getOption(TR_UseSymbolValidationManager))
+         {
+         TR_ASSERT_FATAL(classToValidate, "classToValidate should not be NULL, clazz=%p\n", clazz);
+         recordInfo->data5 = (uintptr_t)classToValidate;
+         }
+
+      cg->addExternalRelocation(new (cg->trHeapMemory()) TR::BeforeBinaryEncodingExternalRelocation(firstInstruction, (uint8_t *) classSymRef, (uint8_t *) recordInfo, reloKind, cg),
+               __FILE__, __LINE__, node);
+      }
+
+   TR::RegisterDependencyConditions *conditions = new (cg->trHeapMemory()) TR::RegisterDependencyConditions(3, 3, cg->trMemory());
+   TR::addDependency(conditions, classReg, TR::RealRegister::x0, TR_GPR, cg);
+   TR::addDependency(conditions, resultReg, TR::RealRegister::NoReg, TR_GPR, cg);
+   TR::addDependency(conditions, zeroReg, TR::RealRegister::xzr, TR_GPR, cg);
+   
+   generateLabelInstruction(cg, TR::InstOpCode::label, node, doneLabel, conditions);
+
+   cg->stopUsingRegister(tempReg1);
+   cg->stopUsingRegister(tempReg2);
+   cg->stopUsingRegister(zeroReg);
+
+   cg->decReferenceCount(firstChild);
+
+   if (classReg != firstChild->getRegister())
+   {
+   cg->stopUsingRegister(classReg);
+   }
+
+   node->setRegister(resultReg);
+   resultReg->setContainsCollectedReference();
+   return resultReg;
+   }
+
 TR::Register *
 J9::ARM64::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR::CodeGenerator *cg)
    {
@@ -557,10 +879,17 @@ J9::ARM64::TreeEvaluator::multianewArrayEvaluator(TR::Node *node, TR::CodeGenera
 TR::Register *
 J9::ARM64::TreeEvaluator::newObjectEvaluator(TR::Node *node, TR::CodeGenerator *cg)
    {
-   TR::ILOpCodes opCode = node->getOpCodeValue();
-   TR::Node::recreate(node, TR::acall);
-   TR::Register *targetRegister = directCallEvaluator(node, cg);
-   TR::Node::recreate(node, opCode);
+   TR::Compilation *comp = cg->comp();
+   TR::Register *targetRegister = TR::TreeEvaluator::VMnewEvaluator(node, cg);
+   if (!targetRegister)
+      {
+      // Inline object allocation wasn't generated, just generate a call to the helper.
+      //
+      TR::ILOpCodes opCode = node->getOpCodeValue();
+      TR::Node::recreate(node, TR::acall);
+      targetRegister = directCallEvaluator(node, cg);
+      TR::Node::recreate(node, opCode);
+      }
    return targetRegister;
    }
 
