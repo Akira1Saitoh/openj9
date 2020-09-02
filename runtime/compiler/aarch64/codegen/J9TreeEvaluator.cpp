@@ -2162,6 +2162,7 @@ TR::Register *J9::ARM64::TreeEvaluator::fremHelper(TR::Node *node, TR::CodeGener
       if ((linkageProp._registerFlags[i] != ARM64_Reserved) && (linkageProp._registerFlags[i] != Preserved))
          {
          auto tmpReg = cg->allocateRegister(TR_GPR);
+         tmpReg->setPlaceholderReg();
          TR::addDependency(dependencies, tmpReg, static_cast<TR::RealRegister::RegNum>(i), TR_GPR, cg);
          cg->stopUsingRegister(tmpReg);
          }
@@ -2171,6 +2172,7 @@ TR::Register *J9::ARM64::TreeEvaluator::fremHelper(TR::Node *node, TR::CodeGener
       if ((linkageProp._registerFlags[i] != ARM64_Reserved) && (linkageProp._registerFlags[i] != Preserved))
          {
          auto tmpReg = cg->allocateRegister(TR_FPR);
+         tmpReg->setPlaceholderReg();
          TR::addDependency(dependencies, tmpReg, static_cast<TR::RealRegister::RegNum>(i), TR_FPR, cg);
          cg->stopUsingRegister(tmpReg);
          }
@@ -2181,6 +2183,7 @@ TR::Register *J9::ARM64::TreeEvaluator::fremHelper(TR::Node *node, TR::CodeGener
    dependencies->addPostCondition(trgReg, TR::RealRegister::v0);
    dependencies->addPreCondition(source2Reg, TR::RealRegister::v1);
    auto tmpReg = cg->allocateRegister(TR_FPR);
+   tmpReg->setPlaceholderReg();
    dependencies->addPostCondition(tmpReg, TR::RealRegister::v1);
    cg->stopUsingRegister(tmpReg);
 
