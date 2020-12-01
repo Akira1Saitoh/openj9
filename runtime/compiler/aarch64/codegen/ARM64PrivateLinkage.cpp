@@ -770,6 +770,7 @@ void J9::ARM64::PrivateLinkage::createEpilogue(TR::Instruction *cursor)
    TR::Node *lastNode = cursor->getNode();
    TR::ResolvedMethodSymbol *bodySymbol = comp()->getJittedMethodSymbol();
    TR::RealRegister *javaSP = machine->getRealRegister(properties.getStackPointerRegister()); // x20
+   const bool restoreLR = machine->getLinkRegisterKilled() || cg()->canExceptByTrap();
 
    // restore preserved GPRs
    int32_t preservedRegisterOffsetFromJavaSP = cg()->getLargestOutgoingArgSize() + getOffsetToFirstParm(); // outgoingArgsSize
@@ -803,7 +804,7 @@ void J9::ARM64::PrivateLinkage::createEpilogue(TR::Instruction *cursor)
 
    // restore return address
    TR::RealRegister *lr = machine->getRealRegister(TR::RealRegister::lr);
-   if (machine->getLinkRegisterKilled())
+   if (restoreLR)
       {
       TR::MemoryReference *returnAddressMR = new (cg()->trHeapMemory()) TR::MemoryReference(javaSP, firstLocalOffset, cg());
       cursor = generateTrg1MemInstruction(cg(), TR::InstOpCode::ldurx, lastNode, lr, returnAddressMR, cursor);
