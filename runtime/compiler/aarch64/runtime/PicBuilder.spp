@@ -55,6 +55,8 @@
 	.globl	_interpreterSyncDoubleStaticGlue
 	.globl	_nativeStaticHelper
 	.globl	_interfaceDispatch
+	.globl	_interfaceCompeteSlot2
+	.globl	_interfaceSlotsUnavailable
 
 	.extern	jitResolveClass
 	.extern	jitResolveClassFromStaticField
@@ -110,7 +112,11 @@
 	.set	J9TR_UICSnippet_CPIndex,	16
 	.set	J9TR_ICSnippet_InterfaceClass,	24
 	.set	J9TR_ICSnippet_ITableIndex,	32
-	.set	J9TR_ICSnippet_J2IThunk,	40
+	.set	J9TR_ICSnippet_FirstClass,	40
+	.set	J9TR_ICSnippet_FirstTarget,	48
+	.set	J9TR_ICSnippet_SecondClass,	56
+	.set	J9TR_ICSnippet_SecondTarget,	64
+	.set	J9TR_ICSnippet_J2IThunk,	72
 
 // Unresolved virtual call snippet
 
@@ -747,6 +753,14 @@ _interfaceCallHelper:
 	stp	x1, x0, [J9SP, #48]
 	mov	x7, x30						// preserve LR
 	ldr	x10, [x30, #J9TR_ICSnippet_codeCacheReturnAddress]	// protect code cache RA in x10 (in L_commonLookupException, it is expected)
+
+	// @@ new
+	// @@ distinguish between x7 (addr of BL in snippet +4) and x10 (main line RA)
+	ldr	x0, [x30, #J9TR_ICSnippet_FirstClass]		// first cache class
+	cmp	x0, #-1
+	dmb	ish						// @isync Make sure none -1 is seen
+	bne	L_continueLookup
+
 	ldr	x0, [x30, #J9TR_ICSnippet_ITableIndex]		// Load ITable Index
 	tst	x0, #J9TR_J9_ITABLE_OFFSET_DIRECT		// Check if J9TR_J9_ITABLE_OFFSET_DIRECT flag is set
 	beq	L_callResolve					// If not set, need to call jitResolveInterfaceMethod
@@ -796,6 +810,18 @@ L_interfaceCallout:
 	add	J9SP, J9SP, #64
 	br	x11						// Call: does not return here
 L_callInterface:
+	// x5: r5, x4: r4
+	add	x6, x7, #J9TR_ICSnippet_FirstClass		// class1 address // xB: r11
+L_loopToSetZero:
+	ldxr	x4, [x6]
+	cmp	x4, #-1
+	bne	L_continueLookup
+	stxr	w3, xzr, [x6]
+	cbnz	w3, L_loopToSetZero
+	dmb	ish
+	b	L_continueLookup
+
+#if 0
 	add	x0, x7, #J9TR_Snippet_CallInstruction		// get address of BL instruction in snippet
 	ldr	x1, const_interfaceDispatch			// get new snippet branch target
 	mov	x2, #TR_ARM64interfaceDispatch
@@ -803,6 +829,9 @@ L_callInterface:
 	mov	x30, x7						// restore LR
 	ldr	x0, [J9SP, #56]					// refetch 'this'
 	b	L_continueInterfaceSend				// lookup interface method and send
+#endif
+
+	// from helper
 _interfaceDispatch:
 	stp	x7, x6, [J9SP, #-64]!				// save argument registers
 	stp	x5, x4, [J9SP, #16]
@@ -816,6 +845,9 @@ L_continueInterfaceSend:
 	mov	x10, x2						// protect LR in x10 (in L_commonLookupException, it is expected)
 	bl	jitLookupInterfaceMethod			// call the helper
 	cbz	x0, L_commonLookupException			// if resolve failed, throw the exception
+
+L_commonJitDispatch:
+	// Require:J9SP-8s,x10(RA),x0(voff) interpVtable offset in x0
 	mov	x9, #J9TR_InterpVTableOffset
 	sub	x9, x9, x0					// convert interp vTableIndex to jit index (must be in x9 for patch virtual)
 	mov	x30, x10					// set LR = code cache RA
@@ -830,7 +862,152 @@ L_continueInterfaceSend:
 	add	J9SP, J9SP, #64
 
 	ldr	x11, [x11, x9]					// jump thru vtable
-	br	x11
+	br	x11						// does not return here
+
+    // @@ p
+    // x7 (addr of BL in snippet + 4, base of ICSnippet_*) or x10 (main line code cache RA)?
+
+L_continueLookup:
+	ldr	x6, [J9SP, #56]				// refetch 'this' // r6
+	add	x1, x7, J9TR_ICSnippet_InterfaceClass		// Address of interface table&slot number // r4
+	mov	x2, x7						// code cache RA
+	LOAD_CLASS(x0, w0, x6)					// Load class pointer
+	and	x0, x0, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits
+	bl	jitLookupInterfaceMethod			// call the helper
+	ldr	x5, [J9SP, #56]					// refetch 'this' // r5
+	LOAD_CLASS(x1, w1, x5)					// Load class pointer
+	and	x1, x1, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits // r6
+	ldr	x1, [x0, x1]					// Load method pointer // r7
+	ldr	x2, [x1, #J9TR_MethodPCStartOffset]		// Load startPC/extra field // r8
+	tst	x2, #J9TR_MethodNotCompiledBit			// Check to see if the method has already been compiled
+	bne	L_commonJitDispatch				// If not compiled // ! Require:J9SP-8s,x10(LR),x0(voff)
+	ldr	w8, [x2, -4]					// Load offset of JIT-to-JIT // r4
+	lsr	w8, w8, 16					// shift right to get the bits we want
+	add	x8, x2, x8					// Addr of JIT-to-JIT in x11 // r8
+	add	x3, x7, #J9TR_ICSnippet_FirstClass		// class1 address
+L_tryToCompleteSlot1:
+	ldxr	x4, [x3]		// ldarx	r4, r11, r5					! either zero or class
+	cbnz	x4, L_commonJitDispatch
+	stxr	w2, x1, [x3]					// 	stdcx.	r6, r11, r5 try to lock
+	cbnz	w2, L_tryToCompleteSlot1			// failed to store
+	str	x8, [x7, #J9TR_ICSnippet_FirstTarget]		// Modify Slot1 target addr
+	dmb	ish
+
+	mov	x8, x0						// Preserve x0 in x8
+	add	x0, x7, #J9TR_Snippet_CallInstruction		// addr of BL instruction in snippet
+	ldr	x1, const_interfaceCompeteSlot2		// Load the callee address
+	mov	x2, #TR_ARM64interfaceCompeteSlot2
+	bl	L_refreshHelper					// rewrite the BL
+
+	mov	x0, x8						// Restore x0
+	ldr	x1, [x7, J9TR_ICSnippet_FirstClass]		// Load slot1 class // @@ x7 preserved?
+	ldr	x2, [x7, J9TR_ICSnippet_InterfaceClass]	// Resolved class
+	ldr	x3, [x1, J9TR_J9Class_classLoader]
+	ldr	x4, [x2, J9TR_J9Class_classLoader]
+	cmp	x3, x4						// Same classLoader?
+	beq	L_commonJitDispatch
+	mov	x6, #J9TR_ICSnippet_FirstClass			// slot1 class offset
+	bl	L_picRegistration
+	b	L_commonJitDispatch
+
+#if 0
+_interfaceDispatch2:
+	stp	x7, x6, [J9SP, #-64]!				// save argument registers
+	stp	x5, x4, [J9SP, #16]
+	stp	x3, x2, [J9SP, #32]
+	stp	x1, x0, [J9SP, #48]
+	mov	x10, x30					// protect LR in x10
+
+	// laddr	r6, 7*ALen(J9SP)					! fetch 'this' // x0
+	LOAD_CLASS(x0, w0, x0)					// Load class pointer
+	and	x0, x0, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits
+	add	x1, x10, #J9TR_ICSnippet_InterfaceClass		// ! Address of interface info @@
+	mov	x2, x10					// Load code cache RA @@ [x30, ccRA] ?
+	bl	jitLookupInterfaceMethod			// call the helper
+
+	ldr	x1, [J9SP, #56]					// refetch 'this'
+	LOAD_CLASS(x1, w1, x1)					// Load class pointer
+	and	x1, x1, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits -- r6 is jump target
+
+	ldr	x1, [x0, x1]					! Load method pointer // r3 is ret val from lookup (voffset)
+	ldr	x2, [x1, #J9TR_MethodPCStartOffset]		// Load startPC/extra field
+	tst	x2, #J9TR_MethodNotCompiledBit			// Check to see if the method has already been compiled
+	bne	L_commonJitDispatch				// If not compiled // ! Require:J9SP-8s,x10(LR),x0(voff)
+	ldr	r4, [x7, #J9TR_ICSnippet_FirstClass]				// class1(?)
+	cmp	r6, r4						!
+	beq	L_commonJitDispatch
+	ldr	w8, [r5, -4]					// Load offset of JIT-to-JIT
+	lsr	w8, w8, 16					// shift right to get the bits we want
+	add	x8, r5, x8					// Addr of JIT-to-JIT in x11
+	add	x6, x7, J9TR_ICSnippet_SecondClass		// class2 address
+L_tryToCompleteSlot2:
+	ldxr	r4, [x6]		// ldarx	r4, r11, r5					! either -1 or class
+	cmp	r4, #-1
+	bne	L_commonJitDispatch
+	stxr	w2, r6, [x6]					// 	stdcx.	r6, r11, r5 try to lock
+	cbnz	w2, L_tryToCompleteSlot2			// failed to store
+	str	r8, [x7, #J9TR_ICSnippet_SecondTarget]	// Modify Slot2 target addr
+	// @@ sync
+
+	add	x0, x7, #J9TR_Snippet_CallInstruction		// get address of BL instruction in snippet
+	ldr	x1, const_interfaceSlotsUnavailable		// address of final helper
+	mov	x2, #TR_ARM64interfaceSlotsUnavailable
+	bl	L_refreshHelper					// rewrite the BL
+	addi	r5, r11, -4					! Location of bl instruction
+
+	mov	x0, r6, r6					! Restore r3 (x0)
+	ldr	x1, [x7, J9TR_ICSnippet_SecondClass]		// Load slot2 class
+	ldr	x2, [x7, J9TR_ICSnippet_InterfaceClass]	// Resolved class
+	ldr	x3, [x1, J9TR_J9Class_classLoader]
+	ldr	x4, [x2, J9TR_J9Class_classLoader]
+	cmp	x3, x4						// Same classLoader?
+	beq	L_commonJitDispatch
+	mov	x6, #J9TR_ICSnippet_SecondClass		// slot2 class offset
+	bl	L_picRegistration
+	b	L_commonJitDispatch
+#endif
+
+L_picRegistration:
+	// x0: vtable offset
+	// x6: offset for First/Second Class slot
+	// x7: saved LR
+	stp	x0, x7, [J9SP, #-24]!				// save registers // @@ use x29?
+	str	x30, [J9SP, #16]
+	add	x1, x7, x6					// address of class slot
+	ldr	x0, [x1]					// class in the slot
+	//add	x1, x1, #4					! Patch the last 4 bytes -- @@
+	bl	jitAddPicToPatchOnClassUnload
+	ldp	x0, x7, [J9SP]					// restore registers
+	ldr	x30, [J9SP, #16]
+	add	x29, x29, #24
+	ret
+
+_interfaceCompeteSlot2:
+	hlt	0
+
+_interfaceSlotsUnavailable:
+	hlt	0
+#if 0 // @@ p
+	mfspr	r11, LR					! Preserve LR content
+	staddr	r10, -8*ALen(J9SP)				! Replaced staddru r10, -8*ALen(J9SP) for P6 perf
+	staddr	r9, -7*ALen(J9SP)
+	addi	J9SP, J9SP, -8*ALen				! Performs update of replaced staddru
+	staddr	r8, 2*ALen(J9SP)
+	staddr	r7, 3*ALen(J9SP)
+	staddr	r6, 4*ALen(J9SP)
+	staddr	r5, 5*ALen(J9SP)
+	staddr	r4, 6*ALen(J9SP)
+	staddr	r3, 7*ALen(J9SP)
+	laddr	r5, jitLookupInterfaceMethod			! Load address of final helper
+	mr	r4, r3						! LOAD_CLASS cannot have identical source and destination
+	LOAD_CLASS(r3,r4)					! Load the class
+	maskVFT(r3)
+	addi	r4, r11, 3*ALen					! Address of interface info
+	mtspr	CTR, r5						! Prepare for long jump
+	mr	r5, r11						! Load code cache RA
+	bcctrl	BO_ALWAYS, CR0_LT					! Call to look up
+	b	.L.commonJitDispatch				! Require: J9SP-8s, r11
+#endif
 
 L_commonLookupException:
 	add	J9SP, J9SP, #64					// clean up stack but do not restore register values
@@ -839,8 +1016,14 @@ L_commonLookupException:
 	b	jitThrowException				// throw it
 
 	.align	3
+#if 0
 const_interfaceDispatch:
 	.dword	_interfaceDispatch
+#endif
+const_interfaceCompeteSlot2:
+	.dword	_interfaceCompeteSlot2
+const_interfaceSlotsUnavailable:
+	.dword	_interfaceSlotsUnavailable
 
 // Handles calls to static call snippets
 //
