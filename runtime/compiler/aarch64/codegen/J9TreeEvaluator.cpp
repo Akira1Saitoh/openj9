@@ -1128,15 +1128,23 @@ void genInstanceOfOrCheckCastArbitraryClassTest(TR::Node *node, TR::Register *in
       }
    else
       {
-      bool isUnloadAssumptionRequired = fej9->isUnloadAssumptionRequired(arbitraryClass, comp->getCurrentMethod());
 
-      if (isUnloadAssumptionRequired)
+      bool isUnloadAssumptionRequired = fej9->isUnloadAssumptionRequired(arbitraryClass, comp->getCurrentMethod());
+      static bool exerciseCDS = feGetEnv("TR_aarch64exerciseCDS") != NULL;
+      if (exerciseCDS)
          {
-         loadAddressConstantInSnippet(cg, node, reinterpret_cast<intptr_t>(arbitraryClass), arbitraryClassReg, TR_NoRelocation, true); 
+         loadAddressConstantInSnippet(cg, node, reinterpret_cast<intptr_t>(arbitraryClass), arbitraryClassReg, TR_NoRelocation, isUnloadAssumptionRequired);
          }
       else
          {
-         loadAddressConstant(cg, node, reinterpret_cast<intptr_t>(arbitraryClass), arbitraryClassReg, NULL, true);
+         if (isUnloadAssumptionRequired)
+            {
+            loadAddressConstantInSnippet(cg, node, reinterpret_cast<intptr_t>(arbitraryClass), arbitraryClassReg, TR_NoRelocation, true); 
+            }
+         else
+            {
+            loadAddressConstant(cg, node, reinterpret_cast<intptr_t>(arbitraryClass), arbitraryClassReg, NULL, true);
+            }
          }
       }
    generateCompareInstruction(cg, node, instanceClassReg, arbitraryClassReg, true);
