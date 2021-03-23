@@ -731,9 +731,29 @@ void TR_UnloadedClassPicSite::compensate(TR_FrontEnd *, bool isSMP, void *)
    *((uint32_t *)_picLocation) = value;
    armCodeSync(_picLocation, 4);
 #elif defined(TR_HOST_ARM64)
-   // On aarch64, we use constant data snippet for class unloading pic site
+
    extern void arm64CodeSync(unsigned char *codeStart, unsigned int codeSize);
-   *(int64_t *)_picLocation = -1;
+   if (_size == 4)
+      {
+      // if size == 4, pic location is the last instruction of sequence of mov instructions to load constant value
+      uint32_t value = *(uint32_t *)_picLocation;
+      // make sure pic location is movzx, movnx or movkx instruction
+      if (((value & 0xbf800000) == 0x92800000) || ((value & 0xff800000) == 0xf2800000))
+         {
+         // rewrite instruction to movzx rX, 1
+         value = 0xd2800020 | (value & 0x1f);
+         *((uint32_t *)_picLocation) = value;
+         }
+      else
+         {
+         printf("---###--- picLocation unexpected value 0x%08x at unloaded class PIC location %p\n", value, _picLocation);
+         }
+      }
+   else
+      {
+      // We use constant data snippet for class unloading pic site with size == 8
+      *(int64_t *)_picLocation = -1;
+      }
    arm64CodeSync(_picLocation, 8);
 #else
    //   TR_ASSERT(0, "unloaded class PIC patching is not implemented on this platform yet");
