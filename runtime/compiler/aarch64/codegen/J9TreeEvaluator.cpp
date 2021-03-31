@@ -3301,13 +3301,11 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
       // pattern match the sequence under the l2a
       // NULLCHK        NULLCHK                     <- node
       //    aloadi f      l2a
-      //       aload O       ladd
-      //                       lshl
-      //                          i2l
-      //                            iloadi/irdbari f <- n
-      //                               aload O        <- reference
-      //                          iconst shftKonst
-      //                       lconst HB
+      //       aload O      lshl
+      //                       iu2l
+      //                          iloadi/irdbari f <- n
+      //                             aload O        <- reference
+      //                       iconst shftKonst
       //
       hasCompressedPointers = true;
       TR::ILOpCodes loadOp = cg->comp()->il.opCodeForIndirectLoad(TR::Int32);
@@ -3331,6 +3329,7 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
 
    bool needExplicitCheck  = true;
    bool needLateEvaluation = true;
+   bool firstChildEvaluated = false;
 
    // Add the explicit check after this instruction
    //
@@ -3339,9 +3338,8 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
    // determine if an explicit check is needed
    if (cg->getHasResumableTrapHandler())
       {
-      if (opCode.isLoadVar()
-            || (opCode.getOpCodeValue() == TR::l2i)
-            || (hasCompressedPointers && firstChild->getFirstChild()->getOpCode().getOpCodeValue() == TR::i2l))
+      if (n->getOpCode().isLoadVar()
+            || (opCode.getOpCodeValue() == TR::l2i))
          {
          TR::SymbolReference *symRef = NULL;
 
@@ -3366,9 +3364,21 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
             // and node->getFirstChild's refCount will be at least 2 (one under the nullchk
             // and the other under the translate treetop)
             //
+            // In this case, the result of load is used in other places, so we prefer implicit NULLCHK.
+            //
             if (hasCompressedPointers
                   && node->getFirstChild()->getReferenceCount() > 2)
+               {
                needLateEvaluation = true;
+
+               // Check if offset from a NULL reference will fall into the inaccessible bytes,
+               // resulting in an implicit trap being raised.
+               if (symRef
+                && ((symRef->getSymbol()->getOffset() + symRef->getOffset()) < cg->getNumberBytesReadInaccessible()))
+                  {
+                  needExplicitCheck = false;
+                  }
+               }
             }
 
          // Check if offset from a NULL reference will fall into the inaccessible bytes,
@@ -3407,7 +3417,6 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
                      {
                      needLateEvaluation = false;
                      needExplicitCheck = true;
-                     reference->incReferenceCount(); // will be decremented again later
                      }
                   }
                }
@@ -3461,17 +3470,15 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
          // The child may generate inline code that provides an implicit null check
          // but we won't know until the child is evaluated.
          //
-         reference->incReferenceCount(); // will be decremented again later
          needLateEvaluation = false;
          cg->evaluate(reference);
          appendTo = cg->getAppendInstruction();
          cg->evaluate(firstChild);
-
+         firstChildEvaluated = true;
          if (cg->getImplicitExceptionPoint()
                && (cg->getNumberBytesReadInaccessible() > cg->fe()->getOffsetOfContiguousArraySizeField()))
             {
             needExplicitCheck = false;
-            cg->decReferenceCount(reference);
             }
          }
       }
@@ -3503,12 +3510,16 @@ J9::ARM64::TreeEvaluator::evaluateNULLCHKWithPossibleResolve(TR::Node *node, boo
    if (needLateEvaluation)
       {
       cg->evaluate(firstChild);
+      firstChildEvaluated = true;
       }
-   else if (needExplicitCheck)
+   if (firstChildEvaluated)
       {
-      cg->decReferenceCount(reference);
+      cg->decReferenceCount(firstChild);
       }
-   cg->decReferenceCount(firstChild);
+   else 
+      {
+      cg->recursivelyDecReferenceCount(firstChild);
+      }
 
    // If an explicit check has not been generated for the null check, there is
    // an instruction that will cause a hardware trap if the exception is to be
