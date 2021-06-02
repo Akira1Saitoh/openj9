@@ -2849,10 +2849,30 @@ J9::ARM64::TreeEvaluator::monentEvaluator(TR::Node *node, TR::CodeGenerator *cg)
       generateCheckForValueMonitorEnterOrExit(node, callLabel, objReg, tempReg, dataReg, cg, J9_CLASS_DISALLOWS_LOCKING_FLAGS);
       }
 
-   generateTrg1Src1ImmInstruction(cg, TR::InstOpCode::addimmx, node, addrReg, objReg, lwOffset); // ldxr/stxr instructions does not take immediate offset
+   static const bool prefetchBeforeMonitorEnter = feGetEnv("TR_AArch64PrefetchBeforeMonEnt") != NULL;
+   if (prefetchBeforeMonitorEnter)
+      {
+      generateMemImmInstruction(cg, TR::InstOpCode::prfmimm, node,
+         new (cg->trHeapMemory()) TR::MemoryReference(objReg, lwOffset, cg), toPrefetchOp(ARM64PrefetchType::STORE, ARM64PrefetchTarget::L1, ARM64PrefetchPolicy::KEEP));
+      }
+
+   generateTrg1Src1ImmInstruction(cg, TR::InstOpCode::addimmx, node, addrReg, objReg, lwOffset); // ldaxr/stxr instructions does not take immediate offset
    generateLabelInstruction(cg, TR::InstOpCode::label, node, loopLabel);
 
-   op = fej9->generateCompressedLockWord() ? TR::InstOpCode::ldxrw : TR::InstOpCode::ldxrx;
+   static const bool useLoadAcquireForMonitorEnter = feGetEnv("TR_AArch64LoadAcquireForMonEnt") != NULL;
+
+   if (useLoadAcquireForMonitorEnter)
+      {
+      /*
+      * Use load-acquire exclusive register for lockword.
+      * In this case, memory barrier after lockword store is not necessary.
+      */
+      op = fej9->generateCompressedLockWord() ? TR::InstOpCode::ldaxrw : TR::InstOpCode::ldaxrx;
+      }
+   else
+      {
+      op = fej9->generateCompressedLockWord() ? TR::InstOpCode::ldxrw : TR::InstOpCode::ldxrx;
+      }
    auto faultingInstruction = generateTrg1MemInstruction(cg, op, node, dataReg, new (cg->trHeapMemory()) TR::MemoryReference(addrReg, (int32_t)0, cg));
 
    // InstructonDelegate::setupImplicitNullPointerException checks if the memory reference uses nullcheck reference register.
@@ -2875,7 +2895,10 @@ J9::ARM64::TreeEvaluator::monentEvaluator(TR::Node *node, TR::CodeGenerator *cg)
    generateTrg1MemSrc1Instruction(cg, op, node, tempReg, new (cg->trHeapMemory()) TR::MemoryReference(addrReg, (int32_t)0, cg), metaReg);
    generateCompareBranchInstruction(cg, TR::InstOpCode::cbnzx, node, tempReg, loopLabel);
 
-   generateSynchronizationInstruction(cg, TR::InstOpCode::dmb, node, 0xB); // dmb ish (Inner Shareable full barrier)
+   if (!useLoadAcquireForMonitorEnter)
+      {
+      generateSynchronizationInstruction(cg, TR::InstOpCode::dmb, node, 0xB); // dmb ish (Inner Shareable full barrier)
+      }
 
    generateLabelInstruction(cg, TR::InstOpCode::label, node, doneLabel, deps);
 
