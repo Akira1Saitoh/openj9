@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 1991, 2019 IBM Corp. and others
+ * Copyright (c) 1991, 2021 IBM Corp. and others
  *
  * This program and the accompanying materials are made available under
  * the terms of the Eclipse Public License 2.0 which accompanies this
@@ -77,7 +77,7 @@ public:
 			UDATA const expectedFlags = hasVMAccess ? J9_PUBLIC_FLAGS_VM_ACCESS : 0;
 #endif /* J9VM_INTERP_ATOMIC_FREE_JNI */
 			/* Expected case: swap in JNI access bits */
-			if (expectedFlags == VM_AtomicSupport::lockCompareExchange(&vmThread->publicFlags, expectedFlags, expectedFlags | criticalFlags)) {
+			if (expectedFlags == VM_AtomicSupport::lockCompareExchangeAcquire(&vmThread->publicFlags, expectedFlags, expectedFlags | criticalFlags)) {
 				/* First entry into a critical region */
 				vmThread->jniCriticalDirectCount = 1;
 			} else {
@@ -142,7 +142,7 @@ public:
 			UDATA const finalFlags = hasVMAccess ? J9_PUBLIC_FLAGS_VM_ACCESS : 0;
 #endif /* J9VM_INTERP_ATOMIC_FREE_JNI */
 			UDATA const jniAccess = criticalFlags | finalFlags;
-			if (jniAccess != VM_AtomicSupport::lockCompareExchange(&vmThread->publicFlags, jniAccess, finalFlags)) {
+			if (jniAccess != VM_AtomicSupport::lockCompareExchangeRelease(&vmThread->publicFlags, jniAccess, finalFlags)) {
 				/* Exiting the last critical region; clear the critical flags.
 				 * Cache a copy of the flags first to determine if we must respond to an exclusive access request.
 				 */
