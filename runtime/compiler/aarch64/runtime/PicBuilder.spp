@@ -877,8 +877,8 @@ L_continueLookup:
 	ldr	x5, [J9SP, #56]					// refetch 'this' // r5
 	LOAD_CLASS(x1, w1, x5)					// Load class pointer
 	and	x1, x1, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits // r6
-	ldr	x1, [x0, x1]					// Load method pointer // r7
-	ldr	x2, [x1, #J9TR_MethodPCStartOffset]		// Load startPC/extra field // r8
+	ldr	x3, [x0, x1]					// Load method pointer // r7
+	ldr	x2, [x3, #J9TR_MethodPCStartOffset]		// Load startPC/extra field // r8
 	tst	x2, #J9TR_MethodNotCompiledBit			// Check to see if the method has already been compiled
 	bne	L_commonJitDispatch				// If not compiled // ! Require:J9SP-8s,x10(LR),x0(voff)
 	ldr	w8, [x2, -4]					// Load offset of JIT-to-JIT // r4
@@ -910,8 +910,7 @@ L_tryToCompleteSlot1:
 	bl	L_picRegistration
 	b	L_commonJitDispatch
 
-#if 0
-_interfaceDispatch2:
+_interfaceCompeteSlot2:
 	stp	x7, x6, [J9SP, #-64]!				// save argument registers
 	stp	x5, x4, [J9SP, #16]
 	stp	x3, x2, [J9SP, #32]
@@ -929,33 +928,34 @@ _interfaceDispatch2:
 	LOAD_CLASS(x1, w1, x1)					// Load class pointer
 	and	x1, x1, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits -- r6 is jump target
 
-	ldr	x1, [x0, x1]					! Load method pointer // r3 is ret val from lookup (voffset)
-	ldr	x2, [x1, #J9TR_MethodPCStartOffset]		// Load startPC/extra field
+	ldr	x3, [x0, x1]					! Load method pointer // r3 is ret val from lookup (voffset)
+	ldr	x2, [x3, #J9TR_MethodPCStartOffset]		// Load startPC/extra field
 	tst	x2, #J9TR_MethodNotCompiledBit			// Check to see if the method has already been compiled
 	bne	L_commonJitDispatch				// If not compiled // ! Require:J9SP-8s,x10(LR),x0(voff)
-	ldr	r4, [x7, #J9TR_ICSnippet_FirstClass]				// class1(?)
-	cmp	r6, r4						!
+	ldr	x4, [x7, #J9TR_ICSnippet_FirstClass]				// class1(?)
+	cmp	x6, x4						!
 	beq	L_commonJitDispatch
-	ldr	w8, [r5, -4]					// Load offset of JIT-to-JIT
+	ldr	w8, [x5, -4]					// Load offset of JIT-to-JIT
 	lsr	w8, w8, 16					// shift right to get the bits we want
-	add	x8, r5, x8					// Addr of JIT-to-JIT in x11
+	add	x8, x5, x8					// Addr of JIT-to-JIT in x11
 	add	x6, x7, J9TR_ICSnippet_SecondClass		// class2 address
 L_tryToCompleteSlot2:
-	ldxr	r4, [x6]		// ldarx	r4, r11, r5					! either -1 or class
-	cmp	r4, #-1
+	ldxr	x4, [x6]		// ldarx	r4, r11, r5					! either -1 or class
+	cmp	x4, #-1
 	bne	L_commonJitDispatch
-	stxr	w2, r6, [x6]					// 	stdcx.	r6, r11, r5 try to lock
+	stxr	w2, x1, [x6]					// 	stdcx.	r6, r11, r5 try to lock
 	cbnz	w2, L_tryToCompleteSlot2			// failed to store
-	str	r8, [x7, #J9TR_ICSnippet_SecondTarget]	// Modify Slot2 target addr
+	str	x8, [x7, #J9TR_ICSnippet_SecondTarget]	// Modify Slot2 target addr
+	dmb ish
 	// @@ sync
 
+	mov	x8, x0						// Preserve x0 in x8
 	add	x0, x7, #J9TR_Snippet_CallInstruction		// get address of BL instruction in snippet
 	ldr	x1, const_interfaceSlotsUnavailable		// address of final helper
 	mov	x2, #TR_ARM64interfaceSlotsUnavailable
 	bl	L_refreshHelper					// rewrite the BL
-	addi	r5, r11, -4					! Location of bl instruction
 
-	mov	x0, r6, r6					! Restore r3 (x0)
+	mov	x0, x8						// Restore x0
 	ldr	x1, [x7, J9TR_ICSnippet_SecondClass]		// Load slot2 class
 	ldr	x2, [x7, J9TR_ICSnippet_InterfaceClass]	// Resolved class
 	ldr	x3, [x1, J9TR_J9Class_classLoader]
@@ -965,7 +965,6 @@ L_tryToCompleteSlot2:
 	mov	x6, #J9TR_ICSnippet_SecondClass		// slot2 class offset
 	bl	L_picRegistration
 	b	L_commonJitDispatch
-#endif
 
 L_picRegistration:
 	// x0: vtable offset
@@ -982,11 +981,19 @@ L_picRegistration:
 	add	x29, x29, #24
 	ret
 
-_interfaceCompeteSlot2:
-	hlt	0
 
 _interfaceSlotsUnavailable:
-	hlt	0
+	stp	x7, x6, [J9SP, #-64]!				// save argument registers
+	stp	x5, x4, [J9SP, #16]
+	stp	x3, x2, [J9SP, #32]
+	stp	x1, x0, [J9SP, #48]
+	mov	x10, x30					// protect LR in x10
+
+	LOAD_CLASS(x0, w0, x0)					// Load class pointer
+	and	x0, x0, #~(J9TR_RequiredClassAlignment-1)	// mask VFT bits
+	bl	jitLookupInterfaceMethod			// call the helper
+	b	L_commonJitDispatch
+
 #if 0 // @@ p
 	mfspr	r11, LR					! Preserve LR content
 	staddr	r10, -8*ALen(J9SP)				! Replaced staddru r10, -8*ALen(J9SP) for P6 perf

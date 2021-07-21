@@ -758,6 +758,10 @@ uint8_t *TR::ARM64InterfaceCallSnippet::emitSnippetBody()
    *(intptr_t *)cursor = 0;
    cursor += sizeof(intptr_t);
 
+   _firstClassCacheSlotLabel->setCodeLocation(cursor);
+   _firstBranchAddressCacheSlotLabel->setCodeLocation(cursor + sizeof(intptr_t));
+   _secondClassCacheSlotLabel->setCodeLocation(cursor + 2*sizeof(intptr_t));
+   _secondBranchAddressCacheSlotLabel->setCodeLocation(cursor + 3*sizeof(intptr_t));
    // Initialize for: two class ptrs, two target addrs
    // Initialize target addrs with the address of the bl
    *(intptr_t *)cursor = -1;
